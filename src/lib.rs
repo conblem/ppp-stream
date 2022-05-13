@@ -1,5 +1,3 @@
-extern crate core;
-
 use futures_util::{ready, FutureExt};
 use ppp::v2::{Addresses, Header, ParseError};
 use std::future::Future;
@@ -9,7 +7,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio_util::io::poll_read_buf;
 
-trait Ext: Sized {
+pub trait Ext {
     fn remote_addr(self: Pin<&mut Self>) -> ProxyProtoFuture<'_, Self>;
     fn remote_addr_unpin(&mut self) -> ProxyProtoFuture<'_, Self> where Self: Unpin;
 }
@@ -31,7 +29,7 @@ where
 }
 
 #[derive(Debug)]
-struct ProxyProtoFuture<'a, T> {
+pub struct ProxyProtoFuture<'a, T: ?Sized> {
     inner: Option<Pin<&'a mut T>>,
     buf: Vec<u8>,
 }
@@ -84,7 +82,7 @@ where
 }
 
 #[derive(Debug)]
-struct ProxyProtoStream<'a, T> {
+pub struct ProxyProtoStream<'a, T> {
     inner: Pin<&'a mut T>,
     buf: Vec<u8>,
     start_of_data: usize,
@@ -92,7 +90,7 @@ struct ProxyProtoStream<'a, T> {
 }
 
 impl <'a, T> ProxyProtoStream<'a, T> {
-    fn inner(&mut self) -> Pin<&mut T> {
+    pub fn inner(&mut self) -> Pin<&mut T> {
         return self.inner.as_mut()
     }
 }
