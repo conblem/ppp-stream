@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::{Error as IoError, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf, AsyncWrite};
 use tokio_util::io::poll_read_buf;
 
 pub trait Ext {
@@ -84,6 +84,27 @@ where
             data,
             addr,
         }));
+    }
+}
+
+impl <'a, T> AsyncWrite for PPPRefStream<'a, T> where T: AsyncWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, IoError>> {
+        let this = self.get_mut();
+        this.inner.as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        let this = self.get_mut();
+        this.inner.as_mut().poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        let this = self.get_mut();
+        this.inner.as_mut().poll_shutdown(cx)
     }
 }
 
@@ -196,12 +217,22 @@ where
         let this = self.get_mut();
         let start_of_data = this.start_of_data;
 
-        if this.data.len() > 0 {
-            buf.put_slice(&this.data[start_of_data..]);
-            this.data = Vec::new();
+        if this.data.len() > 0 && start_of_data < this.data.len() {
+            if buf.remaining() < this.data.len() - start_of_data {
+                let end_len = start_of_data + buf.remaining();
+                buf.put_slice(&this.data[start_of_data..end_len]);
+                this.start_of_data = end_len;
+            } else {
+                buf.put_slice(&this.data[start_of_data..]);
+                this.data = Vec::new();
+            }
+
+            return Poll::Ready(std::io::Result::Ok(()));
+        } else if this.data.len() > 0 {
+            this.data = Vec::new()
         }
 
-        return this.inner.as_mut().poll_read(cx, buf);
+        this.inner.as_mut().poll_read(cx, buf)
     }
 }
 
@@ -212,6 +243,30 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use super::Ext;
+
+    #[tokio::test]
+    async fn test_small_buffer() {
+        let mut buf = Vec::from(PROTOCOL_PREFIX);
+        buf.extend([
+            0x21, 0x12, 0, 16, 127, 0, 0, 1, 192, 168, 1, 1, 0, 80, 1, 187,  4, 0, 1, 42,
+            10, 20, 30, 40, 50, 60
+        ]);
+
+        let mut stream = buf.as_slice();
+        let mut addr = (&mut stream).remote_addr_unpin().await.unwrap();
+
+        let res = addr.read_u8().await.unwrap();
+        assert_eq!(10, res);
+
+        let mut res = vec![0;4];
+        addr.read_exact(&mut res).await.unwrap();
+
+        let expected = vec![20, 30, 40, 50];
+        assert_eq!(expected, res);
+
+        let res = addr.read_u8().await.unwrap();
+        assert_eq!(60, res);
+    }
 
     #[tokio::test]
     async fn test() {
