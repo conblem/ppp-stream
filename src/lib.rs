@@ -4,11 +4,13 @@ use std::future::Future;
 use std::io::{Error as IoError, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, ReadBuf, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::io::poll_read_buf;
 
 pub trait Ext {
-    fn remote_addr_owned(self) -> PPPFuture<Self> where Self: Sized;
+    fn remote_addr_owned(self) -> PPPFuture<Self>
+    where
+        Self: Sized;
     fn remote_addr(self: Pin<&mut Self>) -> PPPRefFuture<'_, Self>;
     fn remote_addr_unpin(&mut self) -> PPPRefFuture<'_, Self>
     where
@@ -19,10 +21,13 @@ impl<T> Ext for T
 where
     T: AsyncRead,
 {
-    fn remote_addr_owned(self) -> PPPFuture<Self> where Self: Sized {
+    fn remote_addr_owned(self) -> PPPFuture<Self>
+    where
+        Self: Sized,
+    {
         PPPFuture {
             inner: Some(self),
-            buf: vec![]
+            buf: vec![],
         }
     }
 
@@ -46,7 +51,7 @@ pub struct PPPFuture<T> {
     buf: Vec<u8>,
 }
 
-impl <T: Unpin> Unpin for PPPFuture<T> {}
+impl<T: Unpin> Unpin for PPPFuture<T> {}
 
 impl<T> Future for PPPFuture<T>
 where
@@ -87,10 +92,13 @@ where
     }
 }
 
-impl <'a, T> AsyncWrite for PPPRefStream<'a, T> where T: AsyncWrite {
+impl<'a, T> AsyncWrite for PPPRefStream<'a, T>
+where
+    T: AsyncWrite,
+{
     fn poll_write(
         self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, IoError>> {
         let this = self.get_mut();
@@ -115,10 +123,17 @@ pub struct PPPStream<T> {
     pub addr: Addresses,
 }
 
-impl <T> Unpin for PPPStream<T> {}
+impl<T> Unpin for PPPStream<T> {}
 
-impl <T> AsyncRead for PPPStream<T> where T: AsyncRead + Unpin {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+impl<T> AsyncRead for PPPStream<T>
+where
+    T: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         let data = std::mem::take(&mut this.data);
 
@@ -126,7 +141,7 @@ impl <T> AsyncRead for PPPStream<T> where T: AsyncRead + Unpin {
             inner: Pin::new(&mut this.inner),
             addr: Addresses::Unspecified,
             data,
-            start_of_data: this.start_of_data
+            start_of_data: this.start_of_data,
         };
 
         let res = Pin::new(&mut stream).poll_read(cx, buf);
@@ -227,7 +242,7 @@ where
                 this.data = Vec::new();
             }
 
-            return Poll::Ready(std::io::Result::Ok(()));
+            return Poll::Ready(Ok(()));
         } else if this.data.len() > 0 {
             this.data = Vec::new()
         }
@@ -248,8 +263,8 @@ mod tests {
     async fn test_small_buffer() {
         let mut buf = Vec::from(PROTOCOL_PREFIX);
         buf.extend([
-            0x21, 0x12, 0, 16, 127, 0, 0, 1, 192, 168, 1, 1, 0, 80, 1, 187,  4, 0, 1, 42,
-            10, 20, 30, 40, 50, 60
+            0x21, 0x12, 0, 16, 127, 0, 0, 1, 192, 168, 1, 1, 0, 80, 1, 187, 4, 0, 1, 42, 10, 20,
+            30, 40, 50, 60,
         ]);
 
         let mut stream = buf.as_slice();
@@ -258,7 +273,7 @@ mod tests {
         let res = addr.read_u8().await.unwrap();
         assert_eq!(10, res);
 
-        let mut res = vec![0;4];
+        let mut res = vec![0; 4];
         addr.read_exact(&mut res).await.unwrap();
 
         let expected = vec![20, 30, 40, 50];
