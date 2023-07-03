@@ -7,173 +7,32 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::io::poll_read_buf;
 
-pub trait Ext {
-    fn remote_addr_owned(self) -> PPPFuture<Self>
-    where
-        Self: Sized;
-    fn remote_addr(self: Pin<&mut Self>) -> PPPRefFuture<'_, Self>;
-    fn remote_addr_unpin(&mut self) -> PPPRefFuture<'_, Self>
-    where
-        Self: Unpin;
-}
-
-impl<T> Ext for T
-where
-    T: AsyncRead,
-{
-    fn remote_addr_owned(self) -> PPPFuture<Self>
-    where
-        Self: Sized,
-    {
+pub trait Ext: Sized + AsyncRead {
+    fn remote_addr(self) -> PPPFuture<Self> {
         PPPFuture {
             inner: Some(self),
             buf: vec![],
         }
     }
-
-    fn remote_addr(self: Pin<&mut Self>) -> PPPRefFuture<'_, Self> {
-        PPPRefFuture {
-            inner: Some(self),
-            buf: vec![],
-        }
-    }
-
-    fn remote_addr_unpin(&mut self) -> PPPRefFuture<'_, Self>
-    where
-        Self: Unpin,
-    {
-        Pin::new(self).remote_addr()
-    }
 }
 
+impl<T: AsyncRead> Ext for T {}
+
+#[derive(Debug)]
 pub struct PPPFuture<T> {
     inner: Option<T>,
     buf: Vec<u8>,
 }
 
-impl<T: Unpin> Unpin for PPPFuture<T> {}
-
-impl<T> Future for PPPFuture<T>
-where
-    T: AsyncRead + Unpin,
-{
+impl<T: AsyncRead + Unpin> Future for PPPFuture<T> {
     type Output = Result<PPPStream<T>, IoError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-
-        let inner = match &mut this.inner {
-            None => panic!("Future polled after completion"),
-            Some(inner) => inner,
-        };
-        let buf = std::mem::take(&mut this.buf);
-
-        let mut fut = PPPRefFuture {
-            inner: Some(Pin::new(inner)),
-            buf,
-        };
-        let res = fut.poll_unpin(cx);
-
-        this.buf = fut.buf;
-
-        let PPPRefStream {
-            start_of_data,
-            addr,
-            data,
-            ..
-        } = ready!(res)?;
-
-        return Poll::Ready(Ok(PPPStream {
-            inner: this.inner.take().unwrap(),
-            start_of_data,
-            data,
-            addr,
-        }));
-    }
-}
-
-impl<'a, T> AsyncWrite for PPPRefStream<'a, T>
-where
-    T: AsyncWrite,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, IoError>> {
-        let this = self.get_mut();
-        this.inner.as_mut().poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        let this = self.get_mut();
-        this.inner.as_mut().poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
-        let this = self.get_mut();
-        this.inner.as_mut().poll_shutdown(cx)
-    }
-}
-
-pub struct PPPStream<T> {
-    inner: T,
-    data: Vec<u8>,
-    start_of_data: usize,
-    pub addr: Addresses,
-}
-
-impl<T> Unpin for PPPStream<T> {}
-
-impl<T> AsyncRead for PPPStream<T>
-where
-    T: AsyncRead + Unpin,
-{
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        let data = std::mem::take(&mut this.data);
-
-        let mut stream = PPPRefStream {
-            inner: Pin::new(&mut this.inner),
-            addr: Addresses::Unspecified,
-            data,
-            start_of_data: this.start_of_data,
-        };
-
-        let res = Pin::new(&mut stream).poll_read(cx, buf);
-        this.data = stream.data;
-
-        return res;
-    }
-}
-
-#[derive(Debug)]
-pub struct PPPRefFuture<'a, T: ?Sized> {
-    inner: Option<Pin<&'a mut T>>,
-    buf: Vec<u8>,
-}
-
-impl<'a, T> Unpin for PPPRefFuture<'a, T> {}
-
-impl<'a, T> Future for PPPRefFuture<'a, T>
-where
-    T: AsyncRead,
-{
-    type Output = Result<PPPRefStream<'a, T>, IoError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
         let buf = &mut this.buf;
-        let inner = match &mut this.inner {
-            Some(inner) => inner.as_mut(),
-            None => panic!("future polled after completion"),
-        };
+        let inner = this.inner.as_mut().expect("future polled after completion");
 
-        let added = ready!(poll_read_buf(inner, cx, buf))?;
+        let added = ready!(poll_read_buf(Pin::new(inner), cx, buf))?;
         // stream is eof
         if added == 0 {
             return Poll::Ready(Err(IoError::new(
@@ -193,7 +52,7 @@ where
         let data = std::mem::take(buf);
         let inner = this.inner.take().unwrap();
 
-        let stream = PPPRefStream {
+        let stream = PPPStream {
             addr,
             inner,
             data,
@@ -205,25 +64,20 @@ where
 }
 
 #[derive(Debug)]
-pub struct PPPRefStream<'a, T> {
-    inner: Pin<&'a mut T>,
+pub struct PPPStream<T> {
+    inner: T,
     data: Vec<u8>,
     start_of_data: usize,
     pub addr: Addresses,
 }
 
-impl<'a, T> PPPRefStream<'a, T> {
-    pub fn inner(&mut self) -> Pin<&mut T> {
-        return self.inner.as_mut();
+impl<T> PPPStream<T> {
+    pub fn inner(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 
-impl<'a, T> Unpin for PPPRefStream<'a, T> {}
-
-impl<'a, T> AsyncRead for PPPRefStream<'a, T>
-where
-    T: AsyncRead,
-{
+impl<T: AsyncRead + Unpin> AsyncRead for PPPStream<T> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -247,7 +101,25 @@ where
             this.data = Vec::new()
         }
 
-        this.inner.as_mut().poll_read(cx, buf)
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for PPPStream<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, IoError>> {
+        Pin::new(self.inner()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        Pin::new(self.inner()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IoError>> {
+        Pin::new(self.inner()).poll_shutdown(cx)
     }
 }
 
@@ -268,7 +140,7 @@ mod tests {
         ]);
 
         let mut stream = buf.as_slice();
-        let mut addr = (&mut stream).remote_addr_unpin().await.unwrap();
+        let mut addr = (&mut stream).remote_addr().await.unwrap();
 
         let res = addr.read_u8().await.unwrap();
         assert_eq!(10, res);
@@ -287,7 +159,7 @@ mod tests {
     async fn test() {
         let mut buf = Vec::from(PROTOCOL_PREFIX);
 
-        let err = (&mut &*buf).remote_addr_unpin().await.unwrap_err();
+        let err = (&mut &*buf).remote_addr().await.unwrap_err();
         let err = err.into_inner().unwrap().downcast::<ParseError>().unwrap();
         assert!(matches!(*err, ParseError::Incomplete(12)));
 
@@ -295,13 +167,13 @@ mod tests {
             0x21, 0x12, 0, 16, 127, 0, 0, 1, 192, 168, 1, 1, 0, 80, 1, 187, 4, 0, 1, 42,
         ]);
         let mut stream = &*buf;
-        let mut addr = (&mut stream).remote_addr_unpin().await.unwrap();
+        let mut addr = (&mut stream).remote_addr().await.unwrap();
         let err = addr.read_u8().await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
 
         buf.push(10);
         let mut stream = &*buf;
-        let mut addr = (&mut stream).remote_addr_unpin().await.unwrap();
+        let mut addr = (&mut stream).remote_addr().await.unwrap();
         let res = addr.read_u8().await.unwrap();
         assert_eq!(10, res);
 
